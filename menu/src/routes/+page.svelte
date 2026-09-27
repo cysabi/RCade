@@ -32,15 +32,21 @@
         );
     }
 
-    async function refreshGames() {
+    function randomGameIndex() {
+        return Math.floor(Math.random() * sortedGames.length);
+    }
+
+    async function refreshGames(randomize: boolean) {
         const currentGameId = currentGame?.id();
         const loadedGames = await loadGames();
         games = loadedGames;
 
         await tick();
 
-        // Try to stay on the same game after refresh
-        if (currentGameId && loadedGames.length > 0) {
+        if (randomize && sortedGames.length > 0) {
+            setPage(randomGameIndex());
+        } else if (currentGameId && loadedGames.length > 0) {
+            // Try to stay on the same game after refresh
             const index = sortedGames.findIndex(
                 (game) => game.id() === currentGameId,
             );
@@ -144,9 +150,11 @@
         const unsubPress = registerPressHandler();
         const unsubInputEnd = registerInputEndHandler();
 
-        // Subscribe to menu key to refresh games list
+        // Subscribe to menu key to refresh games list. This also fires when
+        // exiting a game (before the quit arrives), so only jump to a random
+        // game when the menu itself was already showing.
         onMenuRequested(() => {
-            refreshGames();
+            refreshGames(!gameActive && !gameLoading);
         });
 
         // Event code: pull current state now, then follow rotation pushes
@@ -173,10 +181,7 @@
                         );
 
                         // Start on a random game when there's no last game
-                        if (index == -1)
-                            index = Math.floor(
-                                Math.random() * sortedGames.length,
-                            );
+                        if (index == -1) index = randomGameIndex();
                         setPage(index);
 
                         loading = false;
