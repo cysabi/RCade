@@ -16,8 +16,10 @@
     import { tick, onMount } from "svelte";
     import { Game } from "@rcade/api";
     import { on as onInput } from "@rcade/plugin-input-classic";
-    import Fuse from "fuse.js";
-    import { PLAYER_1 as SPINNERS_P1 } from "@rcade/plugin-input-spinners";
+    import {
+        PLAYER_1 as SPINNERS_P1,
+        PLAYER_2 as SPINNERS_P2,
+    } from "@rcade/plugin-input-spinners";
     import { SCREENSAVER } from "@rcade/plugin-sleep";
     import EventEmitter from "events";
     import { Fireworks, type FireworksOptions } from "@fireworks-js/svelte";
@@ -30,16 +32,22 @@
         );
     }
 
-    async function refreshGames() {
+    function randomGameIndex() {
+        return Math.floor(Math.random() * sortedGames.length);
+    }
+
+    async function refreshGames(randomize: boolean) {
         const currentGameId = currentGame?.id();
         const loadedGames = await loadGames();
         games = loadedGames;
 
         await tick();
 
-        // Try to stay on the same game after refresh
-        if (currentGameId && loadedGames.length > 0) {
-            const index = filteredGames.findIndex(
+        if (randomize && sortedGames.length > 0) {
+            setPage(randomGameIndex());
+        } else if (currentGameId && loadedGames.length > 0) {
+            // Try to stay on the same game after refresh
+            const index = sortedGames.findIndex(
                 (game) => game.id() === currentGameId,
             );
             if (index !== -1) {
@@ -48,8 +56,6 @@
         }
 
         updateVersionMasks();
-        updateFilterMasks();
-        updatePaginationState();
     }
 
     let screensaverActive = false;
@@ -63,117 +69,69 @@
         screensaverActive = false;
     });
 
-    const DELTA_EPSILON = 10;
-    const DELTA_DECAY = 0.97; // Exponential decay factor per frame
-    const SLIDE_SCALE = 1.5; // How much accumulatedDelta affects slide (pixels per unit)
-    const MAX_SLIDE = 20; // Maximum slide distance in pixels
-    let accumulatedDelta = 0;
-    let slideOffset = 0; // Current visual slide of the page
-    let decayLocked = false;
-    let decayLockTimer: ReturnType<typeof setTimeout> | null = null;
+    const DELTA_EPSILON = 10; // Spinner delta per step
+    const SPINNER_IDLE_MS = 500; // Drop partial steps after this long idle
 
-    // run consume deltas every frame
+    // Turns raw spinner deltas into discrete steps, discarding partial
+    // rotation once the spinner has been still for SPINNER_IDLE_MS.
+    function spinnerStepper(onStep: (step: 1 | -1) => void) {
+        let accumulated = 0;
+        let idleTimer: ReturnType<typeof setTimeout> | null = null;
+
+        return (delta: number) => {
+            if (delta === 0) return;
+            accumulated += delta;
+
+            if (idleTimer) clearTimeout(idleTimer);
+            idleTimer = setTimeout(() => {
+                accumulated = 0;
+            }, SPINNER_IDLE_MS);
+
+            while (Math.abs(accumulated) >= DELTA_EPSILON) {
+                const step = accumulated > 0 ? 1 : -1;
+                accumulated -= step * DELTA_EPSILON;
+                onStep(step);
+            }
+        };
+    }
+
+    // Player 1 spinner steps through games (or versions in the drawer)
+    const stepGame = spinnerStepper((step) => {
+        if (viewportState === "neutral") {
+            const newPage = Math.max(
+                0,
+                Math.min(totalPages - 1, activePage + step),
+            );
+            if (newPage !== activePage) {
+                setPage(newPage);
+                moveEvents.emit("move", step < 0);
+            }
+        } else if (viewportState === "show-bottom" && currentGame) {
+            activeVersionIndex = Math.max(
+                0,
+                Math.min(
+                    currentGame.versions().length - 1,
+                    activeVersionIndex + step,
+                ),
+            );
+            triggerScroll(
+                versionsContainer,
+                activeVersionIndex,
+                false,
+                updateVersionMasks,
+            );
+        }
+    });
+
+    // Player 2 spinner jumps between first-letter groups
+    const stepLetter = spinnerStepper((step) => {
+        if (viewportState === "neutral") jumpLetter(step);
+    });
+
     function frameLoop() {
-        if (gameActive) {
-            requestAnimationFrame(frameLoop);
-            return;
-        }
-
-        // Read spinner delta (resets after read) and accumulate
-        const spinnerDelta = SPINNERS_P1.SPINNER.consume_step_delta();
-        accumulatedDelta += spinnerDelta;
-
-        // Lock decay while spinner is active; unlock after 500ms of inactivity
-        if (spinnerDelta !== 0) {
-            decayLocked = true;
-            if (decayLockTimer) clearTimeout(decayLockTimer);
-            decayLockTimer = setTimeout(() => {
-                decayLocked = false;
-            }, 500);
-        }
-
-        // Apply exponential decay to accumulatedDelta (only when unlocked)
-        if (!decayLocked) {
-            if (Math.abs(accumulatedDelta) > 0.01) {
-                accumulatedDelta *= DELTA_DECAY;
-            } else {
-                accumulatedDelta = 0;
-            }
-        }
-
-        // Smoothly interpolate slideOffset toward target (avoids jitter from delta jumps)
-        const targetSlide = Math.max(-MAX_SLIDE, Math.min(MAX_SLIDE, accumulatedDelta * SLIDE_SCALE));
-        slideOffset += (targetSlide - slideOffset) * 0.15;
-
-        // for every DELTA_EPSILON in delta, emit left/right move
-        while (Math.abs(accumulatedDelta) >= DELTA_EPSILON) {
-            if (viewportState === "neutral") {
-                if (accumulatedDelta > 0) {
-                    const newPage = Math.min(totalPages - 1, activePage + 1);
-                    if (newPage !== activePage) {
-                        setPage(newPage);
-                        moveEvents.emit("move", false); // Emit false for right
-                    }
-                    accumulatedDelta -= DELTA_EPSILON;
-                } else if (accumulatedDelta < 0) {
-                    const newPage = Math.max(0, activePage - 1);
-                    if (newPage !== activePage) {
-                        setPage(newPage);
-                        moveEvents.emit("move", true); // Emit true for left
-                    }
-                    accumulatedDelta += DELTA_EPSILON;
-                }
-            } else if (viewportState === "show-top") {
-                if (accumulatedDelta > 0) {
-                    const newIndex = Math.min(
-                        KEYBOARD_KEYS.length - 1,
-                        keyboardCursorIndex + 1,
-                    );
-                    keyboardCursorIndex = newIndex;
-                    triggerScroll(
-                        keyboardContainer,
-                        keyboardCursorIndex,
-                        false,
-                        updateFilterMasks,
-                    );
-                    accumulatedDelta -= DELTA_EPSILON;
-                } else if (accumulatedDelta < 0) {
-                    const newIndex = Math.max(0, keyboardCursorIndex - 1);
-                    keyboardCursorIndex = newIndex;
-                    triggerScroll(
-                        keyboardContainer,
-                        keyboardCursorIndex,
-                        false,
-                        updateFilterMasks,
-                    );
-                    accumulatedDelta += DELTA_EPSILON;
-                }
-            } else if (viewportState === "show-bottom" && currentGame) {
-                if (accumulatedDelta > 0) {
-                    const newIndex = Math.min(
-                        currentGame.versions().length - 1,
-                        activeVersionIndex + 1,
-                    );
-                    activeVersionIndex = newIndex;
-                    triggerScroll(
-                        versionsContainer,
-                        activeVersionIndex,
-                        false,
-                        updateVersionMasks,
-                    );
-                    accumulatedDelta -= DELTA_EPSILON;
-                } else if (accumulatedDelta < 0) {
-                    const newIndex = Math.max(0, activeVersionIndex - 1);
-                    activeVersionIndex = newIndex;
-                    triggerScroll(
-                        versionsContainer,
-                        activeVersionIndex,
-                        false,
-                        updateVersionMasks,
-                    );
-                    accumulatedDelta += DELTA_EPSILON;
-                }
-            }
+        if (!gameActive) {
+            stepGame(SPINNERS_P1.SPINNER.consume_step_delta());
+            stepLetter(SPINNERS_P2.SPINNER.consume_step_delta());
         }
 
         requestAnimationFrame(frameLoop);
@@ -192,9 +150,11 @@
         const unsubPress = registerPressHandler();
         const unsubInputEnd = registerInputEndHandler();
 
-        // Subscribe to menu key to refresh games list
+        // Subscribe to menu key to refresh games list. This also fires when
+        // exiting a game (before the quit arrives), so only jump to a random
+        // game when the menu itself was already showing.
         onMenuRequested(() => {
-            refreshGames();
+            refreshGames(!gameActive && !gameLoading);
         });
 
         // Event code: pull current state now, then follow rotation pushes
@@ -213,16 +173,16 @@
 
             tick().then(() => {
                 updateVersionMasks();
-                updateFilterMasks();
-                updatePaginationState();
 
                 if (games.length > 0) {
                     getLastGame().then((id) => {
-                        let index = filteredGames.findIndex(
+                        let index = sortedGames.findIndex(
                             (game) => game.id() == id,
                         );
 
-                        if (index != -1) setPage(index);
+                        // Start on a random game when there's no last game
+                        if (index == -1) index = randomGameIndex();
+                        setPage(index);
 
                         loading = false;
                     });
@@ -238,73 +198,100 @@
         };
     });
 
-    // --- FILTER LOGIC (Alphabet Keyboard) ---
-    const KEYBOARD_KEYS = ["CLR", "DEL", ..."ABCDEFGHIJKLMNOPQRSTUVWXYZ"];
-    let keyboardCursorIndex = 0;
-    let searchText = "";
-
-    $: fuse = new Fuse(games, {
-        keys: [
-            { name: "displayName", getFn: (g) => g.latest().displayName() ?? "" },
-            { name: "name", getFn: (g) => g.name() ?? "" },
-            { name: "description", getFn: (g) => g.latest().description() ?? "" },
-            { name: "authors", getFn: (g) => g.latest().authors().map((a: any) => a.display_name).join(" ") },
-            { name: "categories", getFn: (g) => g.latest().categories().map((c: any) => c.name).join(" ") },
-        ],
-        threshold: 0.4,
-        ignoreLocation: true,
-    });
-
-    function handleKeyPress(key: string) {
-        if (key === "DEL") {
-            searchText = searchText.slice(0, -1);
-        } else if (key === "CLR") {
-            searchText = "";
-        } else {
-            searchText += key;
-        }
-        activePage = 0;
-        tick().then(updatePaginationState);
-    }
-
     $: sortedGames = [...games].sort((a, b) =>
         (a.latest().displayName() ?? a.name()).localeCompare(
             b.latest().displayName() ?? b.name(),
         ),
     );
 
-    $: filteredGames =
-        searchText.length === 0
-            ? sortedGames
-            : fuse.search(searchText).map((r) => r.item);
+    $: totalPages = sortedGames.length;
 
-    $: totalPages = filteredGames.length;
+    // --- LETTER GROUPS ---
+    type LetterGroup = { letter: string; start: number; count: number };
+
+    function letterOf(game: Game) {
+        const c = (game.latest().displayName() || game.name())
+            .trim()
+            .charAt(0)
+            .toUpperCase();
+        return c >= "A" && c <= "Z" ? c : "#";
+    }
+
+    $: letterGroups = sortedGames.reduce<LetterGroup[]>((groups, game, i) => {
+        const letter = letterOf(game);
+        const last = groups[groups.length - 1];
+        if (last && last.letter === letter) last.count++;
+        else groups.push({ letter, start: i, count: 1 });
+        return groups;
+    }, []);
+
+    $: activeGroupIndex = letterGroups.findIndex(
+        (g) => activePage >= g.start && activePage < g.start + g.count,
+    );
+
+    function jumpLetter(step: number) {
+        const target = letterGroups[activeGroupIndex + step];
+        if (!target) return;
+        setPage(target.start);
+        moveEvents.emit("move", step < 0);
+    }
+
+    // Pagination strip geometry (px). Widths are computed here rather than
+    // measured so box widths and track offsets transition in lockstep.
+    const DOT_PITCH = 9;
+    const MAX_DOTS = 15;
+    const BOX_COLLAPSED = 15;
+    const BOX_GAP = 4;
+    const COUNTER_W = 24;
+    const STRIP_W = 300;
+
+    $: groupLayout = letterGroups.map((g, gi) => {
+        const active = gi === activeGroupIndex;
+        const overflow = g.count > MAX_DOTS;
+        const windowW = Math.min(g.count, MAX_DOTS) * DOT_PITCH;
+        const local = activePage - g.start;
+        const firstVisible = overflow
+            ? Math.max(0, Math.min(g.count - MAX_DOTS, local - (MAX_DOTS >> 1)))
+            : 0;
+        const expandedW = (overflow ? COUNTER_W * 2 : 0) + windowW + 4;
+        return {
+            ...g,
+            active,
+            overflow,
+            windowW,
+            local,
+            dotsOffset: -firstVisible * DOT_PITCH,
+            hiddenLeft: firstVisible,
+            hiddenRight: overflow ? g.count - MAX_DOTS - firstVisible : 0,
+            width: BOX_COLLAPSED + (active ? expandedW : 0),
+        };
+    });
+
+    // Keep the active letter box centered in the strip
+    $: stripOffset = (() => {
+        let x = 0;
+        for (const g of groupLayout) {
+            if (g.active) return STRIP_W / 2 - (x + g.width / 2);
+            x += g.width + BOX_GAP;
+        }
+        return 0;
+    })();
 
     // --- NAVIGATION STATE ---
     let activePage = 0;
     let activeVersionIndex = 0;
     let direction = 1;
-    let viewportState: "neutral" | "show-top" | "show-bottom" = "neutral";
+    let viewportState: "neutral" | "show-bottom" = "neutral";
     let gameActive = false;
     SCREENSAVER.updateScreensaver({ transparent: true });
 
     let versionsContainer: HTMLDivElement;
-    let keyboardContainer: HTMLDivElement;
-    let paginationContainer: HTMLDivElement;
 
     // Mask Variables
     let maskLeftSize = "0px";
     let maskRightSize = "0px";
-    let keyboardMaskLeft = "0px";
-    let keyboardMaskRight = "0px";
 
-    // Pagination specific variables
-    let paginationMaskLeft = "0px";
-    let paginationMaskRight = "0px";
-    let pagesHiddenLeft = 0;
-    let pagesHiddenRight = 0;
-
-    $: currentGame = filteredGames[activePage];
+    $: currentGame = sortedGames[activePage];
     $: currentVersion = currentGame?.versions()[activeVersionIndex];
 
     // RESET LOGIC
@@ -325,18 +312,6 @@
         }
     }
 
-    // --- PAGINATION SYNC ---
-    $: if (paginationContainer && activePage >= 0) {
-        tick().then(() => {
-            triggerScroll(
-                paginationContainer,
-                activePage,
-                false,
-                updatePaginationState,
-            );
-        });
-    }
-
     // --- SCROLL UTILS ---
     function updateVersionMasks() {
         if (!versionsContainer) return;
@@ -344,48 +319,6 @@
         maskLeftSize = scrollLeft > 10 ? "20px" : "0px";
         maskRightSize =
             scrollWidth - clientWidth - scrollLeft > 10 ? "20px" : "0px";
-    }
-
-    function updateFilterMasks() {
-        if (!keyboardContainer) return;
-        const { scrollLeft, scrollWidth, clientWidth } = keyboardContainer;
-        keyboardMaskLeft = scrollLeft > 10 ? "20px" : "0px";
-        keyboardMaskRight =
-            scrollWidth - clientWidth - scrollLeft > 10 ? "20px" : "0px";
-    }
-
-    function updatePaginationState() {
-        if (!paginationContainer) return;
-        const { scrollLeft, scrollWidth, clientWidth } = paginationContainer;
-
-        paginationMaskLeft = scrollLeft > 5 ? "30px" : "0px";
-        paginationMaskRight =
-            scrollWidth - clientWidth - scrollLeft > 5 ? "30px" : "0px";
-
-        if (scrollWidth <= clientWidth) {
-            pagesHiddenLeft = 0;
-            pagesHiddenRight = 0;
-            return;
-        }
-
-        const children = Array.from(
-            paginationContainer.children,
-        ) as HTMLElement[];
-
-        const leftThreshold = scrollLeft;
-        const rightThreshold = scrollLeft + clientWidth;
-
-        let leftCount = 0;
-        let rightCount = 0;
-
-        children.forEach((child) => {
-            const childCenter = child.offsetLeft + child.offsetWidth / 2;
-            if (childCenter < leftThreshold) leftCount++;
-            if (childCenter > rightThreshold) rightCount++;
-        });
-
-        pagesHiddenLeft = leftCount;
-        pagesHiddenRight = rightCount;
     }
 
     let scrollFrame: number;
@@ -501,42 +434,26 @@
                 return;
             }
 
-            if (e.button === "DOWN" && e.player == 1) {
-                if (viewportState === "show-top") {
-                    viewportState = "neutral";
-                } else if (currentGame) {
-                    viewportState = "show-bottom";
-                    tick().then(() =>
-                        triggerScroll(
-                            versionsContainer,
-                            activeVersionIndex,
-                            true,
-                            updateVersionMasks,
-                        ),
-                    );
-                }
-            } else if (e.button === "UP" && e.player == 1) {
-                if (viewportState === "show-bottom") {
-                    viewportState = "neutral";
-                } else {
-                    viewportState = "show-top";
-                    tick().then(() =>
-                        triggerScroll(
-                            keyboardContainer,
-                            keyboardCursorIndex,
-                            true,
-                            updateFilterMasks,
-                        ),
-                    );
-                }
-            }
+            // Version drawer open/close (disabled)
+            // if (e.button === "DOWN" && e.player == 1) {
+            //     if (currentGame) {
+            //         viewportState = "show-bottom";
+            //         tick().then(() =>
+            //             triggerScroll(
+            //                 versionsContainer,
+            //                 activeVersionIndex,
+            //                 true,
+            //                 updateVersionMasks,
+            //             ),
+            //         );
+            //     }
+            // } else if (e.button === "UP" && e.player == 1) {
+            //     viewportState = "neutral";
+            // }
 
-            if (
-                e.button === "A" &&
-                e.player == 1 &&
-                viewportState === "show-top"
-            ) {
-                handleKeyPress(KEYBOARD_KEYS[keyboardCursorIndex]);
+            if (e.player == 1 && viewportState === "neutral") {
+                if (e.button === "UP") jumpLetter(-1);
+                else if (e.button === "DOWN") jumpLetter(1);
             }
 
             if (
@@ -566,21 +483,11 @@
                 e.player == 1 &&
                 viewportState === "neutral"
             ) {
-                if (searchText.length > 0) {
-                    searchText = "";
-                    activePage = 0;
-                    tick().then(updatePaginationState);
-                } else if (currentGame && currentVersion) {
+                if (currentGame && currentVersion) {
                     startGame(
                         currentGame.intoApiResponse(),
                         currentVersion.version(),
                     );
-                }
-            } else if (e.button === "B" && e.player == 1 && viewportState === "show-top") {
-                if (searchText.length > 0) {
-                    handleKeyPress("DEL");
-                } else {
-                    viewportState = "neutral";
                 }
             } else if (e.button === "B" && e.player == 1) {
                 viewportState = "neutral";
@@ -610,15 +517,6 @@
                         false,
                         updateVersionMasks,
                     );
-                } else if (viewportState === "show-top") {
-                    const newIndex = Math.max(0, keyboardCursorIndex - 1);
-                    keyboardCursorIndex = newIndex;
-                    triggerScroll(
-                        keyboardContainer,
-                        keyboardCursorIndex,
-                        false,
-                        updateFilterMasks,
-                    );
                 } else {
                     const newPage = Math.max(0, activePage - 1);
                     if (newPage !== activePage) {
@@ -638,18 +536,6 @@
                         activeVersionIndex,
                         false,
                         updateVersionMasks,
-                    );
-                } else if (viewportState === "show-top") {
-                    const newIndex = Math.min(
-                        KEYBOARD_KEYS.length - 1,
-                        keyboardCursorIndex + 1,
-                    );
-                    keyboardCursorIndex = newIndex;
-                    triggerScroll(
-                        keyboardContainer,
-                        keyboardCursorIndex,
-                        false,
-                        updateFilterMasks,
                     );
                 } else {
                     const newPage = Math.min(totalPages - 1, activePage + 1);
@@ -729,11 +615,7 @@
 </script>
 
 <svelte:window
-    on:resize={() => {
-        updateVersionMasks();
-        updateFilterMasks();
-        updatePaginationState();
-    }}
+    on:resize={updateVersionMasks}
 />
 
 <main class:gameActive>
@@ -745,46 +627,12 @@
     />
     <div
         class="shifting-viewport"
-        class:show-top={viewportState === "show-top"}
         class:show-bottom={viewportState === "show-bottom"}
         style:--tilt-x="{tiltX}deg"
         style:--tilt-y="{tiltY}deg"
-        style:--slide-offset="{slideOffset}px"
     >
-        <div class="filter-drawer">
-            <div class="keyboard-header">
-                <div class="drawer-header">SEARCH</div>
-                <div class="search-display">
-                    <span class="search-text">{searchText || ""}</span><span class="search-cursor">_</span>
-                </div>
-            </div>
-
-            <div
-                class="chips-container keyboard-row"
-                bind:this={keyboardContainer}
-                on:scroll={updateFilterMasks}
-                style="--mask-left: {keyboardMaskLeft}; --mask-right: {keyboardMaskRight};"
-            >
-                {#each KEYBOARD_KEYS as key, i}
-                    <div
-                        class="keyboard-key"
-                        class:cursor-active={i === keyboardCursorIndex}
-                        class:special-key={key === "DEL" || key === "CLR"}
-                        on:click={() => {
-                            keyboardCursorIndex = i;
-                            handleKeyPress(key);
-                        }}
-                        role="button"
-                        tabindex="0"
-                    >
-                        {key}
-                    </div>
-                {/each}
-            </div>
-        </div>
-
         <div class="bg-layer">
-            <BackgroundOverlay events={moveEvents} {slideOffset} />
+            <BackgroundOverlay events={moveEvents} />
         </div>
 
         <div class="ui-layer" class:screensaver={screensaverActive}>
@@ -793,57 +641,79 @@
                     <span>LOADING_GAMES...</span>
                 </div>
             {/if}
-            {#if !loading && viewportState !== "show-top"}
-                <div
-                    class="filter-hud-static"
-                    transition:slide|local={{ duration: 250, axis: "y" }}
-                >
-                    <div class="hud-inner">
-                        {#if searchText.length > 0}
-                            <span class="hud-icon">SEARCH :: "{searchText}"</span>
-                            <span class="hud-msg"
-                                ><span class="key">▲</span> modify · <span class="key">B</span> clear</span
-                            >
-                        {:else}
-                            <span class="hud-msg"
-                                >Use <span class="key">▲</span> to search</span
-                            >
-                        {/if}
-                    </div>
-                </div>
-            {/if}
             {#if !loading && currentGame && currentVersion}
                 <div class="top-section">
-                    <div class="pagination-wrapper">
+                    <div
+                        class="pagination-strip"
+                        style:width="{STRIP_W}px"
+                    >
                         <div
-                            class="pagination-counter left"
-                            class:visible={pagesHiddenLeft > 0}
+                            class="pagination-track"
+                            style:transform="translateX({stripOffset}px)"
+                            style:gap="{BOX_GAP}px"
                         >
-                            +{pagesHiddenLeft}
-                        </div>
-
-                        <div
-                            class="pagination-scroll"
-                            bind:this={paginationContainer}
-                            on:scroll={updatePaginationState}
-                            style="--mask-left: {paginationMaskLeft}; --mask-right: {paginationMaskRight};"
-                        >
-                            {#each Array(totalPages) as _, i}
+                            {#each groupLayout as group (group.letter + group.start)}
                                 <div
-                                    class="dot"
-                                    class:active={i === activePage}
-                                    on:click={() => setPage(i)}
+                                    class="letter-box"
+                                    class:active={group.active}
+                                    style:width="{group.width}px"
+                                    on:click={() => setPage(group.start)}
                                     role="button"
                                     tabindex="0"
-                                ></div>
+                                >
+                                    <span
+                                        class="letter-label"
+                                        style:width="{BOX_COLLAPSED - 2}px"
+                                        >{group.letter}</span
+                                    >
+                                    <div class="letter-body">
+                                        {#if group.overflow}
+                                            <span
+                                                class="letter-counter"
+                                                class:visible={group.hiddenLeft > 0}
+                                                style:width="{COUNTER_W}px"
+                                                >(+{group.hiddenLeft})</span
+                                            >
+                                        {/if}
+                                        <div
+                                            class="dot-window"
+                                            class:fade-left={group.hiddenLeft > 0}
+                                            class:fade-right={group.hiddenRight > 0}
+                                            style:width="{group.windowW}px"
+                                        >
+                                            <div
+                                                class="dot-track"
+                                                style:transform="translateX({group.dotsOffset}px)"
+                                            >
+                                                {#each Array(group.count) as _, i}
+                                                    <div
+                                                        class="dot-slot"
+                                                        style:width="{DOT_PITCH}px"
+                                                        on:click|stopPropagation={() =>
+                                                            setPage(group.start + i)}
+                                                        role="button"
+                                                        tabindex="0"
+                                                    >
+                                                        <div
+                                                            class="dot"
+                                                            class:active={group.active &&
+                                                                i === group.local}
+                                                        ></div>
+                                                    </div>
+                                                {/each}
+                                            </div>
+                                        </div>
+                                        {#if group.overflow}
+                                            <span
+                                                class="letter-counter"
+                                                class:visible={group.hiddenRight > 0}
+                                                style:width="{COUNTER_W}px"
+                                                >(+{group.hiddenRight})</span
+                                            >
+                                        {/if}
+                                    </div>
+                                </div>
                             {/each}
-                        </div>
-
-                        <div
-                            class="pagination-counter right"
-                            class:visible={pagesHiddenRight > 0}
-                        >
-                            +{pagesHiddenRight}
                         </div>
                     </div>
 
@@ -1011,7 +881,6 @@
         --color-text-primary: #ffffff;
         --color-text-secondary: rgba(255, 255, 255, 1);
         --drawer-height: 70px;
-        --filter-drawer-height: 90px;
 
         --font-display: "Syne", sans-serif;
         --font-body: "DM Sans", sans-serif;
@@ -1062,11 +931,6 @@
             rotateY(var(--tilt-y, 0deg))
             translateY(calc(var(--drawer-height) * -1));
     }
-    .shifting-viewport.show-top {
-        transform: perspective(400px) rotateX(var(--tilt-x, 0deg))
-            rotateY(var(--tilt-y, 0deg))
-            translateY(var(--filter-drawer-height));
-    }
 
     .bg-layer {
         position: absolute;
@@ -1078,8 +942,7 @@
             opacity 0.3s var(--ease-snappy);
     }
 
-    .shifting-viewport.show-bottom .bg-layer,
-    .shifting-viewport.show-top .bg-layer {
+    .shifting-viewport.show-bottom .bg-layer {
         filter: brightness(0.4);
         opacity: 0.5;
     }
@@ -1098,8 +961,7 @@
             opacity 0.3s var(--ease-snappy);
     }
 
-    .shifting-viewport.show-bottom .ui-layer,
-    .shifting-viewport.show-top .ui-layer {
+    .shifting-viewport.show-bottom .ui-layer {
         filter: brightness(0.5);
         /* opacity: 0.3; */
     }
@@ -1113,21 +975,7 @@
         color: var(--color-primary);
         letter-spacing: 0.1em;
     }
-    .version-drawer,
-    .filter-drawer {
-        position: absolute;
-        left: 0;
-        width: 100%;
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-        align-items: flex-start;
-        padding: 0;
-        box-sizing: border-box;
-        gap: 6px;
-    }
-    .version-drawer,
-    .filter-drawer {
+    .version-drawer {
         position: absolute;
         left: 0;
         width: 100%;
@@ -1144,12 +992,6 @@
         top: 100%;
         height: var(--drawer-height);
         border-top: 1px solid rgba(250, 204, 21, 1);
-    }
-
-    .filter-drawer {
-        bottom: 100%;
-        height: var(--filter-drawer-height);
-        border-bottom: 1px solid rgba(250, 204, 21, 0.4);
     }
 
     .drawer-header {
@@ -1235,80 +1077,6 @@
         font-weight: 700;
     }
 
-    .keyboard-header {
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        width: 100%;
-        padding-right: 16px;
-    }
-
-    .search-display {
-        font-family: var(--font-mono);
-        font-size: 0.75rem;
-        color: var(--color-primary);
-        letter-spacing: 0.05em;
-        min-width: 0;
-        overflow: hidden;
-        white-space: nowrap;
-    }
-
-    .search-text {
-        color: #fff;
-        font-weight: 700;
-    }
-
-    .search-cursor {
-        animation: blink 1s step-end infinite;
-        color: var(--color-primary);
-    }
-
-    .keyboard-row {
-        gap: 3px;
-    }
-
-    .keyboard-key {
-        height: 30px;
-        min-width: 30px;
-        padding: 0 8px;
-        flex-shrink: 0;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-family: var(--font-mono);
-        font-size: 0.75rem;
-        font-weight: 700;
-        color: #fff;
-        background: #000;
-        border: 1px solid #fff;
-        cursor: pointer;
-        transition: all 0.1s ease;
-        user-select: none;
-    }
-
-    .keyboard-key:hover {
-        background: #222;
-        color: #fff;
-        border-color: #555;
-    }
-
-    .keyboard-key.cursor-active {
-        background: var(--color-primary);
-        color: #000;
-        border-color: var(--color-primary);
-        box-shadow: 0 0 8px rgba(250, 204, 21, 0.4);
-    }
-
-    .keyboard-key.special-key {
-        font-size: 0.55rem;
-        color: #fff;
-        letter-spacing: 0.02em;
-    }
-
-    .keyboard-key.special-key.cursor-active {
-        color: #000;
-    }
-
     .top-section {
         display: flex;
         flex-direction: column;
@@ -1323,38 +1091,164 @@
         flex: 1;
         display: grid;
         grid-template-areas: "stack";
-        align-items: end;
         overflow: hidden;
         width: 100%;
-        transform: translateX(calc(-1 * var(--slide-offset, 0px)));
     }
 
     .slide-container {
         grid-area: stack;
         width: 100%;
+        min-height: 0;
+        display: flex;
     }
 
     .bottom-section {
+        flex: 1;
         width: 100%;
         display: flex;
         flex-direction: column;
-        gap: 16px;
-        padding: 0 16px;
+        justify-content: space-between;
+        gap: 12px;
+        /* Inset to line up with the visible edge of the letter strip's fade */
+        padding: 10px 20px 0;
         box-sizing: border-box;
     }
 
-    .pagination-wrapper {
+    .pagination-strip {
         position: relative;
-        width: 100%;
-        max-width: 300px;
-        margin-bottom: 16px;
-        margin-top: 16px;
-        overflow: visible;
+        max-width: 100%;
+        margin-top: 10px;
+        margin-bottom: 6px;
+        padding: 8px 0;
+        overflow: hidden;
+        mask-image: linear-gradient(
+            to right,
+            transparent 0px,
+            black 24px,
+            black calc(100% - 24px),
+            transparent 100%
+        );
+        -webkit-mask-image: linear-gradient(
+            to right,
+            transparent 0px,
+            black 24px,
+            black calc(100% - 24px),
+            transparent 100%
+        );
+    }
+
+    .pagination-track {
+        display: flex;
+        align-items: center;
+        width: max-content;
+        transition: transform 0.3s var(--ease-snappy);
+    }
+
+    .letter-box {
+        height: 13px;
+        flex-shrink: 0;
+        display: flex;
+        align-items: center;
+        box-sizing: border-box;
+        overflow: hidden;
+        border: 1px solid rgba(255, 255, 255, 0.35);
+        background: rgba(0, 0, 0, 0.4);
+        cursor: pointer;
+        transition:
+            width 0.3s var(--ease-snappy),
+            border-color 0.3s var(--ease-snappy);
+    }
+
+    .letter-box.active {
+        border-color: var(--color-primary);
+    }
+
+    .letter-label {
+        flex-shrink: 0;
+        text-align: center;
+        font-family: var(--font-mono);
+        font-size: 7px;
+        font-weight: bold;
+        line-height: 1;
+        color: rgba(255, 255, 255, 0.6);
+        transition: color 0.3s var(--ease-snappy);
+    }
+
+    .letter-box.active .letter-label {
+        color: var(--color-primary);
+    }
+
+    .letter-body {
+        display: flex;
+        align-items: center;
+        flex-shrink: 0;
+        padding-right: 4px;
+        opacity: 0;
+        transition: opacity 0.3s var(--ease-snappy);
+    }
+
+    .letter-box.active .letter-body {
+        opacity: 1;
+    }
+
+    .letter-counter {
+        flex-shrink: 0;
+        text-align: center;
+        font-family: var(--font-mono);
+        font-size: 6px;
+        font-weight: bold;
+        line-height: 1;
+        color: #fff;
+        opacity: 0;
+        transition: opacity 0.2s ease;
+    }
+
+    .letter-counter.visible {
+        opacity: 0.8;
+    }
+
+    .dot-window {
+        --fade-l: 0px;
+        --fade-r: 0px;
+        flex-shrink: 0;
+        overflow: hidden;
+        mask-image: linear-gradient(
+            to right,
+            transparent 0px,
+            black var(--fade-l),
+            black calc(100% - var(--fade-r)),
+            transparent 100%
+        );
+        -webkit-mask-image: linear-gradient(
+            to right,
+            transparent 0px,
+            black var(--fade-l),
+            black calc(100% - var(--fade-r)),
+            transparent 100%
+        );
+    }
+
+    .dot-window.fade-left {
+        --fade-l: 27px;
+    }
+
+    .dot-window.fade-right {
+        --fade-r: 27px;
+    }
+
+    .dot-track {
+        display: flex;
+        width: max-content;
+        transition: transform 0.3s var(--ease-snappy);
+    }
+
+    .dot-slot {
+        height: 11px;
+        flex-shrink: 0;
         display: flex;
         align-items: center;
         justify-content: center;
-        margin-top: -40px;
-        margin-bottom: -40px;
+        cursor: pointer;
     }
 
     .event-line {
@@ -1377,75 +1271,13 @@
         letter-spacing: 0.2em;
     }
 
-    .pagination-scroll {
-        padding-top: 50px;
-        padding-bottom: 50px;
-        padding-left: 14px;
-        padding-right: 14px;
-
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        overflow-x: auto;
-        overflow-y: visible;
-        scrollbar-width: none;
-        width: fit-content;
-
-        box-sizing: border-box;
-        mask-image: linear-gradient(
-            to right,
-            transparent 0px,
-            black var(--mask-left),
-            black calc(100% - var(--mask-right)),
-            transparent 100%
-        );
-        -webkit-mask-image: linear-gradient(
-            to right,
-            transparent 0px,
-            black var(--mask-left),
-            black calc(100% - var(--mask-right)),
-            transparent 100%
-        );
-    }
-
-    .pagination-scroll::-webkit-scrollbar {
-        display: none;
-    }
-
-    .pagination-counter {
-        position: absolute;
-        top: 50%;
-        transform: translateY(-50%);
-        font-family: var(--font-mono);
-        font-size: 0.5rem;
-        color: #fff;
-        font-weight: bold;
-        pointer-events: none;
-        opacity: 0;
-        transition: opacity 0.2s ease;
-        z-index: 10;
-        text-shadow: 0 0 4px #000;
-    }
-
-    .pagination-counter.visible {
-        opacity: 1;
-    }
-
-    .pagination-counter.left {
-        left: 0;
-    }
-    .pagination-counter.right {
-        right: 0;
-    }
-
     .dot {
         width: 3px;
         height: 3px;
         flex-shrink: 0;
         border-radius: 50%;
         background-color: rgba(255, 255, 255, 0.75);
-        transition: all 0.3s;
-        cursor: pointer;
+        transition: all 0.3s var(--ease-snappy);
     }
 
     .dot:hover {
@@ -1463,7 +1295,7 @@
     .header-group {
         display: flex;
         flex-direction: column;
-        gap: 4px;
+        gap: 6px;
     }
 
     .meta-line {
@@ -1489,7 +1321,8 @@
         margin: 0;
         font-family: var(--font-display);
         font-size: 1.6rem;
-        line-height: 0.95;
+        /* Tall enough that descenders on wrapped lines clear the next line */
+        line-height: 1.05;
         font-weight: 800;
         letter-spacing: -0.02em;
         color: white;
@@ -1511,7 +1344,7 @@
 
     .game-desc {
         margin: 0;
-        margin-top: 4px;
+        margin-top: 2px;
         font-size: 0.65rem;
         color: var(--color-text-secondary);
         line-height: 1.3;
@@ -1521,13 +1354,13 @@
     .data-grid {
         display: flex;
         flex-direction: column;
+        gap: 4px;
     }
 
     .grid-row {
         display: grid;
         grid-template-columns: 40px 1fr;
         align-items: baseline;
-        padding-top: 6px;
         font-weight: 800;
     }
 
@@ -1557,69 +1390,6 @@
         align-items: center;
         gap: 2px;
         color: rgba(255, 255, 255, 0.85);
-    }
-
-    .filter-hud-static {
-        width: 100%;
-        display: flex;
-        justify-content: center;
-        align-items: center;
-        overflow: hidden;
-
-        background: repeating-linear-gradient(
-            0deg,
-            transparent,
-            transparent 2px,
-            rgba(0, 0, 0, 0.5) 3px
-        );
-
-        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-    }
-
-    .hud-inner {
-        padding: 8px 0;
-        display: flex;
-        align-items: center;
-        gap: 10px;
-    }
-
-    .hud-icon {
-        font-family: var(--font-mono);
-        font-size: 0.55rem;
-        color: var(--color-primary);
-        background: rgba(250, 204, 21, 0.1);
-        border: 1px solid rgba(250, 204, 21, 0.3);
-        padding: 2px 6px;
-        letter-spacing: 0.05em;
-        font-weight: 700;
-    }
-
-    .hud-msg {
-        font-family: var(--font-mono);
-        font-size: 0.55rem;
-        color: #fff;
-        text-transform: uppercase;
-    }
-
-    .hud-msg::after {
-        content: "_";
-        animation: blink 1s step-end infinite;
-        color: var(--color-primary);
-        margin-left: 4px;
-    }
-
-    .key {
-        color: #fff;
-    }
-
-    @keyframes blink {
-        0%,
-        100% {
-            opacity: 1;
-        }
-        50% {
-            opacity: 0;
-        }
     }
 
     :global(.fireworks) {

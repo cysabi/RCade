@@ -34,7 +34,6 @@
 		"@rcade/plugin-menu": "workspace:*",
 		"@rcade/plugin-sleep": "workspace:*",
 		"events": "^3.3.0",
-		"fuse.js": "^7.1.0",
 		"three": "^0.182.0"
 	}
 }
