@@ -63,111 +63,69 @@
         screensaverActive = false;
     });
 
-    const DELTA_EPSILON = 10;
-    const DELTA_DECAY = 0.97; // Exponential decay factor per frame
-    const SLIDE_SCALE = 1.5; // How much accumulatedDelta affects slide (pixels per unit)
-    const MAX_SLIDE = 20; // Maximum slide distance in pixels
-    let accumulatedDelta = 0;
-    let slideOffset = 0; // Current visual slide of the page
-    let decayLocked = false;
-    let decayLockTimer: ReturnType<typeof setTimeout> | null = null;
-    let accumulatedLetterDelta = 0;
-    let letterIdleTimer: ReturnType<typeof setTimeout> | null = null;
+    const DELTA_EPSILON = 10; // Spinner delta per step
+    const SPINNER_IDLE_MS = 500; // Drop partial steps after this long idle
 
-    // run consume deltas every frame
+    // Turns raw spinner deltas into discrete steps, discarding partial
+    // rotation once the spinner has been still for SPINNER_IDLE_MS.
+    function spinnerStepper(onStep: (step: 1 | -1) => void) {
+        let accumulated = 0;
+        let idleTimer: ReturnType<typeof setTimeout> | null = null;
+
+        return (delta: number) => {
+            if (delta === 0) return;
+            accumulated += delta;
+
+            if (idleTimer) clearTimeout(idleTimer);
+            idleTimer = setTimeout(() => {
+                accumulated = 0;
+            }, SPINNER_IDLE_MS);
+
+            while (Math.abs(accumulated) >= DELTA_EPSILON) {
+                const step = accumulated > 0 ? 1 : -1;
+                accumulated -= step * DELTA_EPSILON;
+                onStep(step);
+            }
+        };
+    }
+
+    // Player 1 spinner steps through games (or versions in the drawer)
+    const stepGame = spinnerStepper((step) => {
+        if (viewportState === "neutral") {
+            const newPage = Math.max(
+                0,
+                Math.min(totalPages - 1, activePage + step),
+            );
+            if (newPage !== activePage) {
+                setPage(newPage);
+                moveEvents.emit("move", step < 0);
+            }
+        } else if (viewportState === "show-bottom" && currentGame) {
+            activeVersionIndex = Math.max(
+                0,
+                Math.min(
+                    currentGame.versions().length - 1,
+                    activeVersionIndex + step,
+                ),
+            );
+            triggerScroll(
+                versionsContainer,
+                activeVersionIndex,
+                false,
+                updateVersionMasks,
+            );
+        }
+    });
+
+    // Player 2 spinner jumps between first-letter groups
+    const stepLetter = spinnerStepper((step) => {
+        if (viewportState === "neutral") jumpLetter(step);
+    });
+
     function frameLoop() {
-        if (gameActive) {
-            requestAnimationFrame(frameLoop);
-            return;
-        }
-
-        // Read spinner delta (resets after read) and accumulate
-        const spinnerDelta = SPINNERS_P1.SPINNER.consume_step_delta();
-        accumulatedDelta += spinnerDelta;
-
-        // Lock decay while spinner is active; unlock after 500ms of inactivity
-        if (spinnerDelta !== 0) {
-            decayLocked = true;
-            if (decayLockTimer) clearTimeout(decayLockTimer);
-            decayLockTimer = setTimeout(() => {
-                decayLocked = false;
-            }, 500);
-        }
-
-        // Apply exponential decay to accumulatedDelta (only when unlocked)
-        if (!decayLocked) {
-            if (Math.abs(accumulatedDelta) > 0.01) {
-                accumulatedDelta *= DELTA_DECAY;
-            } else {
-                accumulatedDelta = 0;
-            }
-        }
-
-        // Smoothly interpolate slideOffset toward target (avoids jitter from delta jumps)
-        const targetSlide = Math.max(-MAX_SLIDE, Math.min(MAX_SLIDE, accumulatedDelta * SLIDE_SCALE));
-        slideOffset += (targetSlide - slideOffset) * 0.15;
-
-        // for every DELTA_EPSILON in delta, emit left/right move
-        while (Math.abs(accumulatedDelta) >= DELTA_EPSILON) {
-            if (viewportState === "neutral") {
-                if (accumulatedDelta > 0) {
-                    const newPage = Math.min(totalPages - 1, activePage + 1);
-                    if (newPage !== activePage) {
-                        setPage(newPage);
-                        moveEvents.emit("move", false); // Emit false for right
-                    }
-                    accumulatedDelta -= DELTA_EPSILON;
-                } else if (accumulatedDelta < 0) {
-                    const newPage = Math.max(0, activePage - 1);
-                    if (newPage !== activePage) {
-                        setPage(newPage);
-                        moveEvents.emit("move", true); // Emit true for left
-                    }
-                    accumulatedDelta += DELTA_EPSILON;
-                }
-            } else if (viewportState === "show-bottom" && currentGame) {
-                if (accumulatedDelta > 0) {
-                    const newIndex = Math.min(
-                        currentGame.versions().length - 1,
-                        activeVersionIndex + 1,
-                    );
-                    activeVersionIndex = newIndex;
-                    triggerScroll(
-                        versionsContainer,
-                        activeVersionIndex,
-                        false,
-                        updateVersionMasks,
-                    );
-                    accumulatedDelta -= DELTA_EPSILON;
-                } else if (accumulatedDelta < 0) {
-                    const newIndex = Math.max(0, activeVersionIndex - 1);
-                    activeVersionIndex = newIndex;
-                    triggerScroll(
-                        versionsContainer,
-                        activeVersionIndex,
-                        false,
-                        updateVersionMasks,
-                    );
-                    accumulatedDelta += DELTA_EPSILON;
-                }
-            }
-        }
-
-        // Player 2 spinner jumps between first-letter groups
-        const letterDelta = SPINNERS_P2.SPINNER.consume_step_delta();
-        accumulatedLetterDelta += letterDelta;
-
-        if (letterDelta !== 0) {
-            if (letterIdleTimer) clearTimeout(letterIdleTimer);
-            letterIdleTimer = setTimeout(() => {
-                accumulatedLetterDelta = 0;
-            }, 500);
-        }
-
-        while (Math.abs(accumulatedLetterDelta) >= DELTA_EPSILON) {
-            const step = accumulatedLetterDelta > 0 ? 1 : -1;
-            accumulatedLetterDelta -= step * DELTA_EPSILON;
-            if (viewportState === "neutral") jumpLetter(step);
+        if (!gameActive) {
+            stepGame(SPINNERS_P1.SPINNER.consume_step_delta());
+            stepLetter(SPINNERS_P2.SPINNER.consume_step_delta());
         }
 
         requestAnimationFrame(frameLoop);
@@ -214,7 +172,12 @@
                             (game) => game.id() == id,
                         );
 
-                        if (index != -1) setPage(index);
+                        // Start on a random game when there's no last game
+                        if (index == -1)
+                            index = Math.floor(
+                                Math.random() * sortedGames.length,
+                            );
+                        setPage(index);
 
                         loading = false;
                     });
@@ -664,7 +627,7 @@
         style:--tilt-y="{tiltY}deg"
     >
         <div class="bg-layer">
-            <BackgroundOverlay events={moveEvents} {slideOffset} />
+            <BackgroundOverlay events={moveEvents} />
         </div>
 
         <div class="ui-layer" class:screensaver={screensaverActive}>
