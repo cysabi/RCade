@@ -238,12 +238,13 @@
 
     // Pagination strip geometry (px). Widths are computed here rather than
     // measured so box widths and track offsets transition in lockstep.
-    const DOT_PITCH = 9;
+    const DOT_PITCH = 13;
     const MAX_DOTS = 15;
-    const BOX_COLLAPSED = 15;
-    const BOX_GAP = 4;
-    const COUNTER_W = 24;
+    const BOX_COLLAPSED = 22;
+    const BOX_GAP = 6;
+    const COUNTER_W = 36;
     const STRIP_W = 300;
+    const STRIP_FADE = 16; // Fade sits outside the strip's edges
 
     $: groupLayout = letterGroups.map((g, gi) => {
         const active = gi === activeGroupIndex;
@@ -253,7 +254,7 @@
         const firstVisible = overflow
             ? Math.max(0, Math.min(g.count - MAX_DOTS, local - (MAX_DOTS >> 1)))
             : 0;
-        const expandedW = (overflow ? COUNTER_W * 2 : 0) + windowW + 4;
+        const expandedW = (overflow ? COUNTER_W * 2 : 0) + windowW + 6;
         return {
             ...g,
             active,
@@ -271,7 +272,7 @@
     $: stripOffset = (() => {
         let x = 0;
         for (const g of groupLayout) {
-            if (g.active) return STRIP_W / 2 - (x + g.width / 2);
+            if (g.active) return STRIP_FADE + STRIP_W / 2 - (x + g.width / 2);
             x += g.width + BOX_GAP;
         }
         return 0;
@@ -645,7 +646,8 @@
                 <div class="top-section">
                     <div
                         class="pagination-strip"
-                        style:width="{STRIP_W}px"
+                        style:width="{STRIP_W + 2 * STRIP_FADE}px"
+                        style:--strip-fade="{STRIP_FADE}px"
                     >
                         <div
                             class="pagination-track"
@@ -1109,14 +1111,14 @@
         flex-direction: column;
         justify-content: space-between;
         gap: 12px;
-        /* Inset to line up with the visible edge of the letter strip's fade */
-        padding: 10px 20px 0;
+        /* Inset to line up with the edges of the letter strip */
+        padding: 10px 18px 0;
         box-sizing: border-box;
     }
 
     .pagination-strip {
         position: relative;
-        max-width: 100%;
+        flex-shrink: 0;
         margin-top: 10px;
         margin-bottom: 6px;
         padding: 8px 0;
@@ -1124,15 +1126,15 @@
         mask-image: linear-gradient(
             to right,
             transparent 0px,
-            black 24px,
-            black calc(100% - 24px),
+            black var(--strip-fade),
+            black calc(100% - var(--strip-fade)),
             transparent 100%
         );
         -webkit-mask-image: linear-gradient(
             to right,
             transparent 0px,
-            black 24px,
-            black calc(100% - 24px),
+            black var(--strip-fade),
+            black calc(100% - var(--strip-fade)),
             transparent 100%
         );
     }
@@ -1145,7 +1147,7 @@
     }
 
     .letter-box {
-        height: 13px;
+        height: 20px;
         flex-shrink: 0;
         display: flex;
         align-items: center;
@@ -1167,7 +1169,7 @@
         flex-shrink: 0;
         text-align: center;
         font-family: var(--font-mono);
-        font-size: 7px;
+        font-size: 10.5px;
         font-weight: bold;
         line-height: 1;
         color: rgba(255, 255, 255, 0.6);
@@ -1182,7 +1184,7 @@
         display: flex;
         align-items: center;
         flex-shrink: 0;
-        padding-right: 4px;
+        padding-right: 6px;
         opacity: 0;
         transition: opacity 0.3s var(--ease-snappy);
     }
@@ -1195,7 +1197,7 @@
         flex-shrink: 0;
         text-align: center;
         font-family: var(--font-mono);
-        font-size: 6px;
+        font-size: 9px;
         font-weight: bold;
         line-height: 1;
         color: #fff;
@@ -1229,11 +1231,11 @@
     }
 
     .dot-window.fade-left {
-        --fade-l: 27px;
+        --fade-l: 39px;
     }
 
     .dot-window.fade-right {
-        --fade-r: 27px;
+        --fade-r: 39px;
     }
 
     .dot-track {
@@ -1243,7 +1245,7 @@
     }
 
     .dot-slot {
-        height: 11px;
+        height: 16px;
         flex-shrink: 0;
         display: flex;
         align-items: center;
@@ -1272,8 +1274,8 @@
     }
 
     .dot {
-        width: 3px;
-        height: 3px;
+        width: 4.5px;
+        height: 4.5px;
         flex-shrink: 0;
         border-radius: 50%;
         background-color: rgba(255, 255, 255, 0.75);
