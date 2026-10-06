@@ -52,9 +52,9 @@ drag_cancel = 0.95
 
 # --- Rumble ---
 
-# Amplitude of a rumble at intensity 1, volts. A first guess, not measured yet.
+# Amplitude of a rumble at intensity 1, volts.
 rumble = 1.5
-# The rumble's buzz, Hz. A first guess, not measured yet.
+# The rumble's buzz, Hz.
 rumble_hz = 150.0
 
 # --- Each knob's magnets, by its ID (`id` in hello) ---
