@@ -1,7 +1,5 @@
 <script lang="ts">
     import BackgroundOverlay from "$lib/components/BackgroundOverlay.svelte";
-    import KnobTuning from "$lib/dev/KnobTuning.svelte"; // DEV ONLY
-    const DEV_KNOB_TUNING = false;
     import { fly, slide } from "svelte/transition";
     import {
         getEventCode,
@@ -72,7 +70,7 @@
     // Walls are sent once within this many games: further than anyone turns
     // while new curves are in flight.
     const WALL_REACH = 20;
-    let knobFeel = { mass: 0, tension: 0.08, friction: 0.1 };
+    const knobFeel = { mass: 0, tension: 0.08, friction: 0.1 };
     const LETTER_TENSION = 0.22;
 
     function wallsAt(page: number, count: number) {
@@ -126,7 +124,7 @@
         const walls = wallsAt(activePage, totalPages);
         // Undefined until its reactive statement first runs.
         const starts = (letterGroups ?? []).map((group) => group.start).filter((start) => start > 0);
-        const key = JSON.stringify({ walls, knobFeel, starts });
+        const key = JSON.stringify({ walls, starts });
         if (key === knobWalls) return;
         knobWalls = key;
         P1.setCurves(menuCurves(walls, starts)).catch(() => {
@@ -142,7 +140,7 @@
     }
 
     $: if (activePage !== knobPage) placeKnob();
-    $: totalPages, knobFeel, letterGroups, sendCurves();
+    $: totalPages, letterGroups, sendCurves();
 
     P1.subscribe((event) => {
         if (gameHasKnobs()) return;
@@ -692,7 +690,6 @@
                 events={moveEvents}
                 progress={totalPages > 1 ? activePage / (totalPages - 1) : 0}
             />
-            {#if DEV_KNOB_TUNING}<KnobTuning bind:feel={knobFeel} />{/if}<!-- DEV ONLY -->
         </div>
 
         <div class="ui-layer" class:screensaver={screensaverActive}>
