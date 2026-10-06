@@ -51,19 +51,9 @@ sent. `lease` never comes from a game.
 
 ## Native dependency packaging
 
-`serialport` is pinned in both this plugin and the cabinet production dependencies.
-The cabinet esbuild command keeps it external so its native addon stays a real
-Node package. Electron Builder includes production dependencies and unpacks the
-`@serialport/bindings-cpp` addon from ASAR. Its prebuilt N-API binary can be loaded
-by Node and Electron without a device being opened; an OS/architecture without a
-matching prebuild needs a native build rather than copying a binary from another
-platform.
-
-Always verify loading `serialport` from the packaged ASAR, not just a successful
-packaging exit code. With pnpm 11, an unfiltered `pnpm list` reports every workspace
-project; Electron Builder versions that take the first returned project can omit
-cabinet runtime dependencies. Dependency collection must filter to the cabinet
-project (for example, `pnpm list --filter .` from the cabinet directory).
+`serialport` has a native addon, so it's external to the cabinet's esbuild
+bundle, like `node-hid`. `nix/pkgs/cabinet.nix` copies both into the package's
+`node_modules`, with only the linux-x64 prebuilds.
 
 ## Tests
 
