@@ -60,10 +60,13 @@
     SCREENSAVER.addEventListener("started", () => {
         viewportState = "neutral";
         screensaverActive = true;
+        // Motor off while nobody's here.
+        if (!gameHasKnobs()) P1.reset().catch(() => {});
     });
 
     SCREENSAVER.addEventListener("stopped", () => {
         screensaverActive = false;
+        resetKnob();
     });
 
     const DEGREES_PER_GAME = 30;
@@ -120,7 +123,7 @@
     let knobWalls = "";
 
     function sendCurves() {
-        if (gameHasKnobs()) return;
+        if (knobsIdle()) return;
         const walls = wallsAt(activePage, totalPages);
         // Undefined until its reactive statement first runs.
         const starts = (letterGroups ?? []).map((group) => group.start).filter((start) => start > 0);
@@ -133,7 +136,7 @@
     }
 
     function placeKnob() {
-        if (gameHasKnobs()) return;
+        if (knobsIdle()) return;
         knobPage = activePage;
         sendCurves();
         P1.tare(activePage * DEGREES_PER_GAME).catch(() => {});
@@ -143,7 +146,7 @@
     $: totalPages, letterGroups, sendCurves();
 
     P1.subscribe((event) => {
-        if (gameHasKnobs()) return;
+        if (knobsIdle()) return;
         moveEvents.emit("drag", event.deltaAngle / DEGREES_PER_GAME);
         if (viewportState !== "neutral" || totalPages === 0) return;
         const page = Math.max(0, Math.min(totalPages - 1, Math.round(event.globalAngle / DEGREES_PER_GAME)));
@@ -175,7 +178,7 @@
     let letterIdle: ReturnType<typeof setTimeout> | undefined;
 
     P2.subscribe((event) => {
-        if (gameHasKnobs() || viewportState !== "neutral") return;
+        if (knobsIdle() || viewportState !== "neutral") return;
         letterTurned += event.deltaAngle;
         clearTimeout(letterIdle);
         letterIdle = setTimeout(() => (letterTurned = 0), LETTER_IDLE_MS);
@@ -445,6 +448,10 @@
 
     function gameHasKnobs() {
         return gameActive || gameLoading;
+    }
+
+    function knobsIdle() {
+        return gameHasKnobs() || screensaverActive;
     }
     let gameError: string | undefined = undefined;
 
